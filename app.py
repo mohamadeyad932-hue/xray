@@ -1,73 +1,118 @@
-import io
-import torch
-import torch.nn as nn
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from PIL import Image
-from transformers import AutoImageProcessor, AutoModel
-from peft import PeftModel
-from huggingface_hub import hf_hub_download
+import io, base64, os
+import requests as http_requests
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
-app = FastAPI(title="Smart Chest X-Ray API")
+# ══════════════════════════════════════════════════════════
+# سيرفر وسيط خفيف (Proxy) — يدعم إدخال الـ Token عبر متغيرات البيئة
+# ══════════════════════════════════════════════════════════
 
-REPO_ID = "eyad-ai/SmartChestXRay"
-CLASSES = ["COVID", "Lung_Opacity", "Normal", "Viral Pneumonia"]
+HF_SPACE_URL = os.environ.get("HF_SPACE_URL", "https://eyad-ai-xray-gradio.hf.space")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")  # يُدخل كمدخل بيئة (Environment Variable)
+GRADIO_API_URL = f"{HF_SPACE_URL}/api/predict"
 
-print("⏳ جاري تحميل النموذج محلياً على سيرفر Render...")
+app = FastAPI(title="Smart Chest X-Ray API (Proxy)")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+)
 
-# 1. تحميل المعالج والباكبون الأساسي ودمج LoRA
-processor = AutoImageProcessor.from_pretrained("microsoft/rad-dino")
-base_backbone = AutoModel.from_pretrained("microsoft/rad-dino")
-peft_model = PeftModel.from_pretrained(base_backbone, REPO_ID)
-merged_backbone = peft_model.merge_and_unload()
-hidden_size = merged_backbone.config.hidden_size
-
-# 2. بناء معمارية النموذج المطابقة تماماً لرأس التصنيف لديك (768)
-class ChestXRayModel(nn.Module):
-    def __init__(self, backbone, hidden_size, num_classes):
-        super().__init__()
-        self.backbone = backbone
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.0),
-            nn.Linear(hidden_size, num_classes)
-        )
-
-    def forward(self, pixel_values):
-        outputs = self.backbone(pixel_values=pixel_values)
-        if getattr(outputs, "pooler_output", None) is not None:
-            pooled = outputs.pooler_output
-        else:
-            pooled = outputs.last_hidden_state[:, 0, :]
-        return self.classifier(pooled)
-
-model = ChestXRayModel(merged_backbone, hidden_size, len(CLASSES))
-
-# 3. تحميل وربط أوزان رأس التصنيف بدقة متناهية
-head_path = hf_hub_download(repo_id=REPO_ID, filename="disease_head.pt")
-state_dict = torch.load(head_path, map_location="cpu")
-with torch.no_grad():
-    model.classifier[1].weight.copy_(state_dict["1.weight"])
-    model.classifier[1].bias.copy_(state_dict["1.bias"])
-
-model.eval()
-print("✅ تم تحميل النموذج وجاهز للتنبؤ بنجاح!")
 
 @app.get("/")
-def home():
-    return {"status": "Smart Chest X-Ray API is running locally!"}
+async def health():
+    return {"status": "running", "mode": "proxy", "backend": HF_SPACE_URL}
+
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
         image_bytes = await file.read()
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        
-        inputs = processor(images=image, return_tensors="pt")
-        
-        with torch.no_grad():
-            outputs = model(**inputs)
-            probabilities = torch.nn.functional.softmax(outputs, dim=-1)[0]
-        
-        result = {CLASSES[i]: float(probabilities[i]) for i in range(len(CLASSES))}
-        return result
+    except Exception:
+        raise HTTPException(status_code=400, detail="تعذر قراءة الملف")
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if file.filename else "png"
+    mime = "image/png" if ext == "png" else "image/jpeg"
+    img_b64 = f"data:{mime};base64," + base64.b64encode(image_bytes).decode("utf-8")
+    del image_bytes
+
+    # تجهيز الترويسات مع تمرير التوكن إذا كان موجوداً
+    headers = {"Content-Type": "application/json"}
+    if HF_TOKEN:
+        headers["Authorization"] = f"Bearer {HF_TOKEN}"
+
+    try:
+        response = http_requests.post(
+            GRADIO_API_URL,
+            json={"data": [img_b64]},
+            headers=headers,
+            timeout=120,
+        )
+    except http_requests.exceptions.Timeout:
+        raise HTTPException(
+            status_code=504,
+            detail="السيرفر الخلفي (HF Space) لم يرد — أعد المحاولة بعد 30 ثانية."
+        )
+    except http_requests.exceptions.ConnectionError:
+        raise HTTPException(
+            status_code=502,
+            detail="تعذر الاتصال بالسيرفر الخلفي (HF Space)."
+        )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"خطأ من السيرفر الخلفي: {response.text[:300]}"
+        )
+
+    try:
+        result = response.json()
+        data = result.get("data", [])
+
+        diagnosis_text = data[0] if len(data) > 0 else "غير متوفر"
+
+        all_probabilities = {}
+        if len(data) > 1 and isinstance(data[1], dict):
+            confidences = data[1].get("confidences", [])
+            for item in confidences:
+                label = item.get("label", "?")
+                conf = item.get("confidence", 0)
+                all_probabilities[label] = f"{conf * 100:.1f}%"
+
+        heatmap_base64 = None
+        if len(data) > 2 and data[2]:
+            heatmap_data = data[2]
+            if isinstance(heatmap_data, str) and heatmap_data.startswith("data:"):
+                heatmap_base64 = heatmap_data.split(",", 1)[1]
+            elif isinstance(heatmap_data, dict) and "url" in heatmap_data:
+                try:
+                    img_resp = http_requests.get(
+                        heatmap_data["url"] if heatmap_data["url"].startswith("http")
+                        else f"{HF_SPACE_URL}/file={heatmap_data['url']}",
+                        headers={"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {},
+                        timeout=30
+                    )
+                    heatmap_base64 = base64.b64encode(img_resp.content).decode("utf-8")
+                except Exception:
+                    pass
+
+        predicted_class = "Normal"
+        confidence_val = "0.0%"
+        if all_probabilities:
+            predicted_class = max(all_probabilities, key=lambda k: float(all_probabilities[k].replace("%", "")))
+            confidence_val = all_probabilities[predicted_class]
+
+        return {
+            "status": "Abnormal ⚠️" if predicted_class != "Normal" else "Healthy ✅",
+            "predicted_class": predicted_class,
+            "confidence": confidence_val,
+            "all_probabilities": all_probabilities,
+            "heatmap_base64": heatmap_base64,
+            "diagnosis_text": diagnosis_text,
+        }
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"خطأ في تفسير النتيجة: {e}")
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)
