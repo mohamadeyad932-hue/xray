@@ -1,8 +1,9 @@
-torch
+fastapi
+uvicorn
+python-multipart
+torch --index-url https://download.pytorch.org/whl/cpu
 transformers
 peft
 huggingface_hub
 Pillow
-gradio
-matplotlib
 numpy
