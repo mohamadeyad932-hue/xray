@@ -1,4 +1,7 @@
-fastapi
-uvicorn
-python-multipart
-requests
+torch
+torchvision
+transformers
+peft
+huggingface_hub
+Pillow
+gradio
