@@ -1,0 +1,8 @@
+torch
+transformers
+peft
+huggingface_hub
+Pillow
+gradio
+matplotlib
+numpy
