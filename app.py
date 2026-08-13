@@ -12,7 +12,7 @@ app.add_middleware(
 # ══════════════════════════════════════════════════════════
 # إعدادات الـ API الخاصة بـ Hugging Face
 # ══════════════════════════════════════════════════════════
-HF_TOKEN = "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"
+HF_TOKEN = "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"
 API_URL = "https://api-inference.huggingface.co/models/eyad-ai/SmartChestXRay"
 headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
