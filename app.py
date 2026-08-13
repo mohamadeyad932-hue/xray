@@ -1,3 +1,4 @@
+import os
 import requests
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,9 +11,9 @@ app.add_middleware(
 )
 
 # ══════════════════════════════════════════════════════════
-# إعدادات الـ API الخاصة بـ Hugging Face
+# إعدادات الـ API الخاصة بـ Hugging Face (قراءة آمنة من السيرفر)
 # ══════════════════════════════════════════════════════════
-HF_TOKEN = "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"
+HF_TOKEN = os.environ.get("HF_TOKEN")
 API_URL = "https://api-inference.huggingface.co/models/eyad-ai/SmartChestXRay"
 headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
